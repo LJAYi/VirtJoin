@@ -1,13 +1,7 @@
 #!/bin/bash
 # ============================================================
-#  virtjoin v2.4 — Virtual Disk Joiner for Proxmox VE
-#  Author: ChatGPT + Community
-#  Highlights:
-#   • Truly one-line install (auto-detect pipe input)
-#   • Safe systemd non-interactive rebuild
-#   • Config saved to /var/lib/virtjoin/config
-#   • 4K sector / GPT / wrong pairing protection
-#   • Robust cleanup and restart-safe
+#  virtjoin v2.5 — Virtual Disk Joiner for Proxmox VE
+#  Author: LJAYi
 # ============================================================
 
 set -euo pipefail
@@ -33,11 +27,11 @@ need_cmd() { command -v "$1" >/dev/null 2>&1 || die "缺少命令: $1"; }
 for c in blockdev losetup dmsetup dd truncate awk grep sed stat systemctl lsblk curl; do need_cmd "$c"; done
 mkdir -p "$INSTALL_DIR"
 
-# ---- 自安装检测（增强版，支持一行安装） ----
+# ---- 自安装检测（完美兼容版） ----
 self_install_check() {
   local cur
-  # 如果脚本来自管道或进程替换，则直接下载正式文件
-  if [ ! -e "$0" ] || [[ "$0" =~ ^/proc/ ]] || [[ "$0" == "bash" ]]; then
+  # 检测脚本是否来自管道或虚拟fd
+  if [ ! -f "$0" ] || [[ "$0" =~ ^/proc/ ]] || [[ "$0" =~ ^/dev/fd/ ]] || [[ "$0" == "bash" ]] || [[ "$0" == -* ]]; then
     echo "[virtjoin] 检测到脚本来自管道输入，自动安装到 $SELF_PATH ..."
     mkdir -p "$(dirname "$SELF_PATH")"
     curl -fsSL "https://raw.githubusercontent.com/LJAYi/VirtJoin/main/virtjoin.sh" -o "$SELF_PATH"
@@ -46,7 +40,7 @@ self_install_check() {
     exec "$SELF_PATH" "$@"
   fi
 
-  # 普通文件执行，自安装到目标路径
+  # 正常文件执行，自安装
   if command -v realpath >/dev/null 2>&1; then cur="$(realpath "$0")"; else cur="$(readlink -f "$0")"; fi
   if [ "$cur" != "$SELF_PATH" ]; then
     echo "[virtjoin] 安装脚本到 $SELF_PATH ..."
@@ -59,7 +53,7 @@ self_install_check() {
 }
 self_install_check "$@"
 
-# ---- 辅助函数 ----
+# ---- 工具函数 ----
 loop_of() { losetup -j "$1" | awk -F: '{print $1}'; }
 
 show_status() {
@@ -89,12 +83,13 @@ remove_mapping() {
   sleep 0.2
 }
 
-# ---- 构建核心逻辑 ----
+# ---- 核心构建 ----
 _do_build() {
   [ -n "${DISK:-}" ] && [ -n "${PART:-}" ] || die "DISK/PART 为空"
   [ -b "$DISK" ] || die "磁盘不存在: $DISK"
   [ -b "$PART" ] || die "分区不存在: $PART"
 
+  # 校验配对
   pbase="$(basename "$PART")"; dbase="$(basename "$DISK")"
   disk_of_part="$(basename "$(realpath "/sys/class/block/$pbase/..")")"
   [ "$disk_of_part" = "$dbase" ] || die "选择错误：$PART 不属于 $DISK"
@@ -116,7 +111,6 @@ _do_build() {
   else
     log "保留现有 header.img"
   fi
-
   truncate -s $((TAIL_SECTORS * SS)) "$TAIL_IMG"
   log "tail.img 已创建或更新"
 
@@ -137,13 +131,12 @@ EOF
   echo -e "${green}✅ 已创建 /dev/mapper/$DM_NAME${reset}"
 }
 
-# ---- 交互式配置 ----
+# ---- 交互配置 ----
 create_mapping_interactive() {
   echo -e "${green}✨ 创建/重建 virtjoin（交互配置）...${reset}"
   lsblk -dpno NAME,SIZE,MODEL | grep -E "/dev/sd|/dev/nvme" || true
   read -rp "请输入目标磁盘 (例如 /dev/sda): " DISK
   [ -b "$DISK" ] || die "$DISK 不是块设备。"
-
   lsblk -no NAME,SIZE,FSTYPE,MOUNTPOINT "$DISK"
   read -rp "请选择要直通的分区 (例如 sda1 或 /dev/sda1): " PART
   [[ "$PART" != /dev/* ]] && PART="/dev/$PART"
@@ -165,7 +158,6 @@ create_mapping_interactive() {
 create_mapping_from_config() {
   log "从配置加载并创建映射（非交互）..."
   [ -f "$CONFIG_FILE" ] || die "未找到 $CONFIG_FILE，请先交互配置。"
-  # shellcheck disable=SC1090
   source "$CONFIG_FILE"
   remove_mapping
   _do_build
@@ -233,7 +225,6 @@ while true; do
     echo "当前：/dev/mapper/$DM_NAME 不存在"
   fi
   [ -f "$CONFIG_FILE" ] && echo "配置文件：$CONFIG_FILE" || echo "配置文件：<未生成>"
-
   echo
   echo "1) 查看当前状态"
   echo "2) 创建或重新拼接虚拟整盘 (交互配置)"
@@ -243,7 +234,6 @@ while true; do
   echo "6) 完全卸载 virtjoin"
   echo "0) 退出"
   read -rp "请选择操作 [0-6]: " opt; echo
-
   case "$opt" in
     1) show_status ;;
     2) create_mapping_interactive ;;
