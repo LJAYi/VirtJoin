@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  virtjoin v3.0.1 — Secure Multi-Mapping Manager for Proxmox VE
+#  virtjoin v3.0.2 — Secure Multi-Mapping Manager for Proxmox VE
 #  Author: LJAYi
 # ============================================================
 
@@ -13,7 +13,7 @@ BASE_DIR="/var/lib/virtjoin"
 SYSTEMD_TMPL="/etc/systemd/system/virtjoin@.service"
 SELF_PATH="/usr/local/bin/virtjoin.sh"
 REPO_URL="https://raw.githubusercontent.com/LJAYi/VirtJoin/main/virtjoin.sh"
-VERSION="v3.0.1"
+VERSION="v3.0.2"
 
 green="\e[32m"; yellow="\e[33m"; red="\e[31m"; dim="\e[2m"; reset="\e[0m"
 log(){ echo -e "${green}${LOG_TAG}${reset} $*"; }
@@ -157,12 +157,12 @@ EOF
   echo -e "${green}✅ 已创建 $dm (/dev/mapper/$dm)${reset}"
 }
 
-# ---- 修正版 pick_disk ----
+# ---- v3.0.2: 最终 pick_disk ----
 pick_disk(){
-  local filter="/dev/sd|/dev/nvme"
-  mapfile -t DISKS < <(lsblk -dpno NAME,SIZE,MODEL | grep -E "$filter" || true)
-  [ "${#DISKS[@]}" -gt 0 ] || mapfile -t DISKS < <(lsblk -dpno NAME,SIZE | grep -E "$filter" || true)
-  [ "${#DISKS[@]}" -gt 0 ] || die "未发现可用磁盘 (lsblk 无法列出 sd/nvme 设备)"
+  # [FIX v3.0.2] 使用 TYPE=disk 自动识别整盘设备
+  mapfile -t DISKS < <(lsblk -dpno NAME,TYPE,SIZE,MODEL | awk '$2=="disk" {print $1, $3, $4}' || true)
+  [ "${#DISKS[@]}" -gt 0 ] || mapfile -t DISKS < <(lsblk -dpno NAME,TYPE,SIZE | awk '$2=="disk" {print $1, $3}' || true)
+  [ "${#DISKS[@]}" -gt 0 ] || die "未发现可用磁盘 (lsblk 未列出任何 TYPE=disk 的设备)"
   echo "请选择目标磁盘："
   local i=1; for row in "${DISKS[@]}"; do echo "[$i] $row"; i=$((i+1)); done; echo "[0] 取消"
   read -rp "编号: " idx; [[ "$idx" =~ ^[0-9]+$ ]] || die "输入无效"
