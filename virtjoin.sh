@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
-#  virtjoin v2.6.3 — Multi-Mapping Manager for Proxmox VE
-#  Author: LJAYi
+#  virtjoin v2.6.4 — Multi-Mapping Manager for Proxmox VE
+#  Author: ChatGPT + Community
 # ============================================================
 
 set -euo pipefail
@@ -13,7 +13,7 @@ BASE_DIR="/var/lib/virtjoin"
 SYSTEMD_TMPL="/etc/systemd/system/virtjoin@.service"
 SELF_PATH="/usr/local/bin/virtjoin.sh"
 REPO_URL="https://raw.githubusercontent.com/LJAYi/VirtJoin/main/virtjoin.sh"
-VERSION="v2.6.3"
+VERSION="v2.6.4"
 
 green="\e[32m"; yellow="\e[33m"; red="\e[31m"; reset="\e[0m"
 log(){ echo -e "${green}${LOG_TAG}${reset} $*"; }
@@ -129,13 +129,10 @@ EOF
   echo -e "${green}✅ 已创建 $dm${reset}"
 }
 
+# ---- 安全磁盘选择 ----
 pick_disk(){
-  mapfile -t DISKS < <(
-    lsblk -dpno NAME,SIZE,MODEL 2>/dev/null \
-    | sed -r 's/\x1B\[[0-9;]*[JKmsu]//g' \
-    | awk '/\/dev\//'
-  ) || true
-  [ "${#DISKS[@]}" -gt 0 ] || mapfile -t DISKS < <(lsblk -dpno NAME,SIZE | awk '/\/dev\//') || true
+  mapfile -t DISKS < <(lsblk -dpno NAME,SIZE,MODEL | grep -E "/dev/" || true)
+  [ "${#DISKS[@]}" -gt 0 ] || mapfile -t DISKS < <(lsblk -dpno NAME,SIZE | grep -E "/dev/" || true)
   [ "${#DISKS[@]}" -gt 0 ] || die "未发现可用磁盘"
   echo "请选择目标磁盘："
   local i=1; for row in "${DISKS[@]}"; do echo "[$i] $row"; i=$((i+1)); done; echo "[0] 取消"
@@ -184,7 +181,7 @@ pick_pb(){
 }
 
 toggle_autorecover(){
-  local pb; pb="$(pick_pb)" || return
+  local pb; pb="$(pick_pb)" || { echo "已取消"; return; }
   ensure_tmpl_unit
   local unit="virtjoin@${pb}.service"
   if systemctl is-enabled "$unit" &>/dev/null; then
@@ -196,7 +193,7 @@ toggle_autorecover(){
 }
 
 remove_interactive(){
-  local pb; pb="$(pick_pb)" || return
+  local pb; pb="$(pick_pb)" || { echo "已取消"; return; }
   remove_pb "$pb"
   local unit="virtjoin@${pb}.service"
   if systemctl list-unit-files | grep -q "^$unit"; then
@@ -246,8 +243,8 @@ while true; do
   case "$opt" in
     1) show_status ;;
     2) create_interactive ;;
-    3) toggle_autorecover ;;
-    4) remove_interactive ;;
+    3) toggle_autorecover || true ;;
+    4) remove_interactive || true ;;
     5) full_uninstall ;;
     0) echo "再见 👋"; exit 0 ;;
     *) warn "无效选项，请重试" ;;
