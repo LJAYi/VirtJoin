@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  virtjoin v2.6.1 — Multi-Mapping Manager for Proxmox VE
+#  virtjoin v2.6.2 — Multi-Mapping Manager for Proxmox VE
 #  Author: LJAYi
 # ============================================================
 
@@ -47,7 +47,6 @@ self_install_check() {
 self_install_check "$@"
 
 loop_of(){ losetup -j "$1" | awk -F: '{print $1}'; }
-
 pb_from_part(){ basename "$1"; }
 dir_of_pb(){ echo "$BASE_DIR/$1"; }
 dmname_of_pb(){ echo "virtjoin-$1"; }
@@ -83,7 +82,7 @@ show_status(){
     any=1
     local dm="/dev/mapper/$(dmname_of_pb "$pb")"
     if dmsetup info "$(dmname_of_pb "$pb")" &>/dev/null; then
-      echo "• $(dmname_of_pb "$pb") 存在  ($dm)"
+      echo "• $(dmname_of_pb "$pb") 存在 ($dm)"
     else
       echo "• $(dmname_of_pb "$pb") 不存在"
     fi
@@ -129,8 +128,14 @@ EOF
   echo -e "${green}✅ 已创建 $dm${reset}"
 }
 
+# ---- 安全磁盘选择 ----
 pick_disk(){
-  mapfile -t DISKS < <(lsblk -dpno NAME,SIZE,MODEL | grep -E "/dev/")
+  mapfile -t DISKS < <(
+    lsblk -dpno NAME,SIZE,MODEL 2>/dev/null \
+    | sed -r 's/\x1B\[[0-9;]*[JKmsu]//g' \
+    | awk '/\/dev\//'
+  ) || true
+  [ "${#DISKS[@]}" -gt 0 ] || mapfile -t DISKS < <(lsblk -dpno NAME,SIZE | awk '/\/dev\//') || true
   [ "${#DISKS[@]}" -gt 0 ] || die "未发现可用磁盘"
   echo "请选择目标磁盘："
   local i=1; for row in "${DISKS[@]}"; do echo "[$i] $row"; i=$((i+1)); done; echo "[0] 取消"
