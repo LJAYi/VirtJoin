@@ -1,181 +1,192 @@
+VirtJoin（虚拟整盘拼接）
 
-🧱 virtjoin — Virtual Disk Joiner for Proxmox VE
+版本：v3.0.4（多映射 + 手动输入）
 
-🧩 virtjoin 是一个交互式自动化工具，用于在 PVE / Proxmox 环境中，把物理磁盘的 分区表 + 分区 + 尾部空间 拼接成一块“虚拟整盘”，从而：
-	•	虚拟机能看到完整磁盘（含分区表）；
-	•	宿主仍能使用其它分区（比如 sda2）；
-	•	支持一键安装、开机自恢复、完全卸载。
-
-⸻
-
-✨ 功能特点
-
-✅ 一键安装
-✅ 交互式选择磁盘与分区
-✅ 自动拼接 header/tail + 分区 → 虚拟整盘 /dev/mapper/virtjoin
-✅ 开机自动重建映射（systemd 服务）
-✅ 安全：宿主与虚拟机分区隔离
-✅ 一键卸载：清除映射 + loop + 服务 + 自身
+把宿主机上的某个分区作为“整盘”的中间段，前后用伪造的 Header/Tail 填充，拼接成一块看起来像整盘的块设备（/dev/mapper/virtjoin-xxx），再把它直通给虚拟机。这样虚机能看到原磁盘的分区表 + sda1 分区内容，而宿主机仍可保留其他分区给自身使用。
+适用于 Proxmox VE（PVE）等 KVM/QEMU 环境。
 
 ⸻
 
-🧩 适用场景
-	•	你想让 虚拟机看到完整磁盘（含 GPT 表），但又不想把整盘直通；
-	•	例如：
-	•	/dev/sda 有分区：
-	•	sda1 给 VM；
-	•	sda2 给 PVE；
-	•	你希望 VM 看到完整 /dev/sda，同时宿主还在用 sda2。
+✨ 特性一览
+	•	多映射：每个分区独立目录、独立 dm 名、独立 systemd 实例（virtjoin@<分区>.service）。
+	•	安全校验：校验“分区属于磁盘”、检查 GPT 备份分区表空间（尾部 ≥ 33 扇区）。
+	•	稳健运行：失败自动清理 loop（trap），避免遗留 /dev/loop*。
+	•	性能友好：header.img 仅首次创建，开机自动恢复不反复重建。
+	•	一行安装：自动将脚本安装到 /usr/local/bin/virtjoin.sh 并自重启。
+	•	PVE 友好：结果设备可直接用 qm set 挂载到 VM（virtio/scsi 等）。
 
 ⸻
 
-🚀 一键安装与使用
+🛠 适用场景
+	•	你只想把物理磁盘的一块分区直通给 VM，但希望 VM 看到完整磁盘结构（含分区表 + 该分区）。
+	•	宿主机继续使用同一磁盘上的其他分区（例如备份、宿主系统、数据盘等）。
+
+⸻
+
+⚙️ 安装
 
 bash <(curl -fsSL https://raw.githubusercontent.com/LJAYi/VirtJoin/main/virtjoin.sh)
 
-启动后会进入交互式菜单 👇：
+安装完成后会在：
 
-===============================
-  virtjoin 控制中心
-===============================
+/usr/local/bin/virtjoin.sh
+
+
+⸻
+
+🚀 快速使用
+	1.	运行控制台
+
+virtjoin.sh
+
+进入菜单：
+
 1) 查看当前状态
-2) 创建或重新拼接虚拟整盘
-3) 手动移除映射
-4) 注册 systemd 自动恢复
-5) 完全卸载 virtjoin
+2) 创建/重建 virtjoin（手动输入磁盘/分区）
+3) 注册/取消 systemd 自动恢复
+4) 手动移除某个映射（同时取消自动恢复）
+5) 卸载 virtjoin（清理所有映射/服务/脚本）
 0) 退出
--------------------------------
+
+	2.	创建/重建（手动输入）
+
+	•	先展示 TYPE=disk 的整盘列表（仅供参考）。
+	•	手动输入目标磁盘与分区，例如：
+
+请输入目标磁盘: /dev/sda
+请选择要直通的分区: sda1   # 或 /dev/sda1
+
+
+	•	成功后会生成 /dev/mapper/virtjoin-sda1。
+
+	3.	连接到 VM（以 VMID=101 为例）
+
+# 推荐 virtio
+qm set 101 -virtio0 /dev/mapper/virtjoin-sda1
+
+# 或 SCSI
+# qm set 101 -scsi0 /dev/mapper/virtjoin-sda1
+
+	4.	开机自动恢复（可选）
+
+# 菜单 3 → 选择某个映射（如 sda1）→ 启用/取消
+# 会生成/启用：virtjoin@sda1.service
+
+	5.	移除映射 / 卸载
+
+	•	菜单 4：移除单个映射（可选同时取消自动恢复）
+	•	菜单 5：完全卸载（清理所有映射、服务与脚本）
+
+⸻
+
+📂 目录结构
+
+/var/lib/virtjoin/
+ ├─ sda1/                 # 每个分区一个目录
+ │   ├─ config            # DISK=/dev/sda, PART=/dev/sda1, PB=sda1
+ │   ├─ header.img        # 真实磁盘头部镜像（仅首次创建）
+ │   ├─ tail.img          # 尾部占位镜像（动态调整）
+ │   └─ table.txt         # dmsetup 表（设备映射规则）
+ └─ nvme0n1p1/
+     └─ ...
 
 
 ⸻
 
-⚙️ 安装示例流程
+🔒 安全与一致性
+	•	分区归属检查：确保 PART 确实属于 DISK，避免把 /dev/sdb1 错指向 /dev/sda。
+	•	GPT 备份表空间：尾部空间至少 33 扇区，避免覆盖备份 GPT（若不足则拒绝创建）。
+	•	只读/只首创 header：减少无谓 I/O，避免开机时重复 dd 读盘。
+	•	异常清理：构建过程中失败会自动 losetup -d，避免资源泄漏。
 
-示例：宿主 /dev/sda 有两个分区：
-sda1 给虚拟机，sda2 给 PVE。
+⸻
 
-在菜单中选择：
+🧪 示例
 
-2) 创建或重新拼接虚拟整盘
+# 交互创建 -> virtjoin-sda1
+virtjoin.sh
 
-然后交互输入：
+# 查看状态
+virtjoin.sh --status
 
-请输入目标磁盘 (例如 /dev/sda): /dev/sda
-请选择要直通的分区 (例如 sda1): sda1
+# 非交互重建（单配置）
+virtjoin.sh --create-from-config /var/lib/virtjoin/sda1/config
 
-virtjoin 将自动：
-	•	提取 /dev/sda 的分区表头；
-	•	拼接 /dev/sda1；
-	•	添加尾部占位；
-	•	创建 /dev/mapper/virtjoin。
+# 启用/取消自动恢复
+virtjoin.sh --toggle-autorecover
 
-虚拟机看到的磁盘将包含原分区表结构：
+# 移除映射（菜单 4 或 CLI）
+virtjoin.sh --remove
 
-/dev/sdb
- ├─sdb1  (直通的 sda1)
- └─sdb2  (尾部虚拟区)
+# 完全卸载
+virtjoin.sh --uninstall
 
 
 ⸻
 
-🧰 常用命令
+⚠️ 已知问题（当前版本行为说明）
 
-命令	功能
-virtjoin.sh --status	查看当前虚拟整盘状态
-virtjoin.sh --create	手动重建映射
-virtjoin.sh --remove	移除映射与 loop
-virtjoin.sh --uninstall	完全卸载（移除映射 + loop + systemd + 自身）
+由于今天未继续排查并修复，以下行为在部分环境中可能出现。请留意。
+
+	1.	磁盘列表不能自动选择（“没法2没法自动”）
+	•	菜单第 2 项（创建/重建） 中的“整盘列表”为只读展示，不提供数字选择；需要你手动输入 /dev/sdX / /dev/nvmeXnY / /dev/vdX 等设备名。
+	•	这么做的原因是不同发行版 lsblk 输出差异较大，自动编号选择在少数系统上会不稳定。当前版本以手动输入为准，确保在所有设备命名方案下都可用。
+	2.	菜单第 3、4 项（注册/取消自动恢复、手动移除映射）可能出现“空白、编号没用”的情况
+	•	触发条件通常是：尚未成功创建任何映射（即 /var/lib/virtjoin/<PB>/config 不存在）。
+	•	表现为进入 3 或 4 后没有列表，或提示编号但没有条目。
+	•	当前逻辑：当没有任何配置时，这两项会提示“暂无配置”并返回菜单；如果你看到“编号: ”却没有条目，请先通过菜单 2 完成至少一次映射创建。
+	•	后续版本会持续增强兼容性与可见性（例如在空列表时显式显示提示并立即返回，不再出现“编号空白”体验）。
+	3.	自动恢复仅针对已存在的配置生效
+	•	必须先通过“创建/重建（手动输入）”生成 config，virtjoin@<PB>.service 才能正常启用并在开机重建。
+
+若你遇到与上述不同的异常（例如系统已有配置但 3/4 仍空白），建议先执行：
+
+find /var/lib/virtjoin -mindepth 2 -maxdepth 2 -type f -name config -print -exec sed -n '1,2p' {} \;
+
+贴出结果以便定位。
+
+⸻
+
+🧰 故障排查速查表
+	•	检查是否已创建配置：
+
+find /var/lib/virtjoin -name config -print
+
+
+	•	检查映射是否存在：
+
+dmsetup info | grep virtjoin
+ls -l /dev/mapper/ | grep virtjoin
+
+
+	•	检查 loop 残留（可安全移除）：
+
+losetup -a
+
 
 
 ⸻
 
-🔁 开机自动恢复
+🧹 卸载
 
-virtjoin 自动注册 systemd 服务：
+virtjoin.sh --uninstall
+# 或在菜单选择 5
 
-/etc/systemd/system/virtjoin.service
-
-系统每次启动时会自动执行：
-
-ExecStart=/usr/local/bin/virtjoin.sh --create
-
-从而重建 /dev/mapper/virtjoin。
+将清理：所有映射、所有 systemd 实例、全部配置目录与脚本自身。
 
 ⸻
 
-💡 配置后在 PVE 里添加磁盘
+📄 许可证
 
-配置完成后，执行：
-
-qm set 101 -scsi1 /dev/mapper/virtjoin
-
-启动虚拟机后：
-	•	你会看到完整的磁盘（含分区表）；
-	•	但实际数据只映射到 /dev/sda1；
-	•	/dev/sda2 仍由宿主机自由使用。
+MIT（除非仓库另有声明）。
 
 ⸻
 
-🧹 完全卸载
+💬 反馈
 
-在菜单中选择：
+欢迎在 GitHub Issue 中提交：
+	•	你的发行版、内核版本
+	•	lsblk -dpno NAME,TYPE,SIZE,MODEL 输出
+	•	出现问题时的终端截图/日志
 
-5) 完全卸载 virtjoin
-
-或者命令行执行：
-
-sudo virtjoin.sh --uninstall
-
-它将自动：
-	•	停止并删除 /dev/mapper/virtjoin
-	•	卸载 loop
-	•	删除 /var/lib/virtjoin
-	•	移除 systemd 服务
-	•	删除 /usr/local/bin/virtjoin.sh
-
-⸻
-
-⚠️ 注意事项
-
-说明	细节
-宿主与 VM 双写风险	⚠️ 宿主不能同时挂载 /dev/sda1 与虚拟机访问同一分区。
-GPT 修改	VM 修改分区表只影响 header 镜像，不改动宿主实际 GPT。
-性能	通过 dmsetup 映射，性能损耗可忽略（<3%）。
-分区调整	如果宿主修改物理分区布局，请先卸载再重新运行 virtjoin。
-
-
-⸻
-
-🧠 工作原理概述
-
-virtjoin 将磁盘拼接为：
-
-| GPT头 (header.img) | sda1 实区 | GPT尾 (tail.img) |
-
-并通过 device-mapper 创建虚拟设备：
-
-/dev/mapper/virtjoin
-
-虚拟机看到的磁盘 = 完整 /dev/sda
-宿主看到的分区依旧独立。
-
-⸻
-
-🪄 高级用户
-
-你也可以直接执行命令行：
-
-virtjoin.sh --create   # 手动重建映射
-virtjoin.sh --status   # 查看状态
-virtjoin.sh --remove   # 移除映射
-virtjoin.sh --uninstall # 完全清理
-
-
-⸻
-
-🧱 许可证
-
-MIT License © 2025 [LJAYi]
-
-
-可以直接附在仓库中。
+我们会在后续版本继续改进菜单可见性与自动枚举体验。
