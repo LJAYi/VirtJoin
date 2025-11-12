@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  virtjoin v2.6.4 — Multi-Mapping Manager for Proxmox VE
+#  virtjoin v3.0 — Secure Multi-Mapping Manager for Proxmox VE
 #  Author: LJAYi
 # ============================================================
 
@@ -13,15 +13,15 @@ BASE_DIR="/var/lib/virtjoin"
 SYSTEMD_TMPL="/etc/systemd/system/virtjoin@.service"
 SELF_PATH="/usr/local/bin/virtjoin.sh"
 REPO_URL="https://raw.githubusercontent.com/LJAYi/VirtJoin/main/virtjoin.sh"
-VERSION="v2.6.4"
+VERSION="v3.0"
 
-green="\e[32m"; yellow="\e[33m"; red="\e[31m"; reset="\e[0m"
+green="\e[32m"; yellow="\e[33m"; red="\e[31m"; dim="\e[2m"; reset="\e[0m"
 log(){ echo -e "${green}${LOG_TAG}${reset} $*"; }
 warn(){ echo -e "${yellow}${LOG_TAG}${reset} ⚠️ $*"; }
 die(){ echo -e "${red}${LOG_TAG} ERROR:${reset} $*" >&2; exit 1; }
 
 need_cmd(){ command -v "$1" >/dev/null 2>&1 || die "缺少命令: $1"; }
-for c in blockdev losetup dmsetup dd truncate awk grep sed stat systemctl lsblk curl readlink; do need_cmd "$c"; done
+for c in blockdev losetup dmsetup dd truncate awk grep sed stat systemctl lsblk curl readlink realpath; do need_cmd "$c"; done
 mkdir -p "$BASE_DIR"
 
 # ---- 自安装检测 ----
@@ -47,14 +47,15 @@ self_install_check() {
 }
 self_install_check "$@"
 
-loop_of(){ losetup -j "$1" | awk -F: '{print $1}'; }
-pb_from_part(){ basename "$1"; }
-dir_of_pb(){ echo "$BASE_DIR/$1"; }
-dmname_of_pb(){ echo "virtjoin-$1"; }
-cfg_of_dir(){ echo "$1/config"; }
+# ---- 基础工具 ----
+loop_of() { losetup -j "$1" | awk -F: '{print $1}'; }
+pb_from_part() { basename "$1"; }
+dir_of_pb()    { echo "$BASE_DIR/$1"; }
+dmname_of_pb() { echo "virtjoin-$1"; }
+cfg_of_dir()   { echo "$1/config"; }
 header_of_dir(){ echo "$1/header.img"; }
-tail_of_dir(){ echo "$1/tail.img"; }
-table_of_dir(){ echo "$1/table.txt"; }
+tail_of_dir()  { echo "$1/tail.img"; }
+table_of_dir() { echo "$1/table.txt"; }
 
 ensure_tmpl_unit(){
 cat >"$SYSTEMD_TMPL" <<'EOF'
@@ -82,11 +83,13 @@ show_status(){
     [ -z "$pb" ] && continue
     any=1
     local dm="/dev/mapper/$(dmname_of_pb "$pb")"
+    local cfg="$(cfg_of_dir "$(dir_of_pb "$pb")")"
     if dmsetup info "$(dmname_of_pb "$pb")" &>/dev/null; then
       echo "• $(dmname_of_pb "$pb") 存在 ($dm)"
     else
       echo "• $(dmname_of_pb "$pb") 不存在"
     fi
+    [ -f "$cfg" ] && echo "  ↳ $(sed -n '1,2p' "$cfg" | tr '\n' ' ')"
   done < <(list_pbs)
   [ "$any" -eq 0 ] && echo "暂无任何 virtjoin 映射。"
   echo -e "===========================\n"
@@ -103,36 +106,60 @@ remove_pb(){
   done
 }
 
+# ---- 核心构建逻辑 ----
 _do_build_from_cfg(){
-  local cfg="$1"; [ -f "$cfg" ] || die "缺少配置 $cfg"
-  # shellcheck disable=SC1090
+  local cfg="$1"
+  [ -f "$cfg" ] || die "缺少配置: $cfg"
   source "$cfg"
+  [ -n "${DISK:-}" ] && [ -n "${PART:-}" ] && [ -n "${PB:-}" ] || die "配置不完整: $cfg"
+
   local d="$(dir_of_pb "$PB")" dm="$(dmname_of_pb "$PB")"
   local hdr="$(header_of_dir "$d")" tl="$(tail_of_dir "$d")" tbl="$(table_of_dir "$d")"
-  [ -b "$DISK" ] && [ -b "$PART" ] || die "设备不存在"
-  local SS=$(blockdev --getss "$DISK")
-  local pbase=$(basename "$PART") dbase=$(basename "$DISK")
-  local START=$(cat /sys/block/"$dbase"/"$pbase"/start)
-  local PART_SECTORS=$(blockdev --getsz "$PART")
-  local DISK_SECTORS=$(blockdev --getsz "$DISK")
-  local TAIL_SECTORS=$((DISK_SECTORS - START - PART_SECTORS))
+  [ -b "$DISK" ] || die "磁盘不存在: $DISK"
+  [ -b "$PART" ] || die "分区不存在: $PART"
+
+  # 校验分区归属
+  local pbase dbase got
+  pbase="$(basename "$PART")"; dbase="$(basename "$DISK")"
+  got="$(basename "$(realpath "/sys/class/block/$pbase/..")")"
+  [ "$got" = "$dbase" ] || die "选择错误：$PART 不属于 $DISK"
+
+  local SS START PART_SECTORS DISK_SECTORS TAIL_SECTORS
+  SS=$(blockdev --getss "$DISK")
+  START=$(cat /sys/block/"$dbase"/"$pbase"/start)
+  PART_SECTORS=$(blockdev --getsz "$PART")
+  DISK_SECTORS=$(blockdev --getsz "$DISK")
+  TAIL_SECTORS=$((DISK_SECTORS - START - PART_SECTORS))
+  [ "$TAIL_SECTORS" -ge 33 ] || die "尾部空间不足（$TAIL_SECTORS 扇区）"
+
   mkdir -p "$d"
-  dd if="$DISK" of="$hdr" bs="$SS" count="$START" status=none
+  if [ ! -f "$hdr" ]; then
+    dd if="$DISK" of="$hdr" bs="$SS" count="$START" status=none
+    log "[$dm] header.img 已创建"
+  else
+    log "[$dm] 保留 header.img"
+  fi
   truncate -s $((TAIL_SECTORS * SS)) "$tl"
-  local LOOP_HEADER=$(losetup -fP --show "$hdr") LOOP_TAIL=$(losetup -fP --show "$tl")
+
+  local LOOP_HEADER LOOP_TAIL
+  LOOP_HEADER=$(losetup -fP --show "$hdr")
+  LOOP_TAIL=$(losetup -fP --show "$tl")
+  cleanup_loops() { losetup -d "$LOOP_HEADER" 2>/dev/null || true; losetup -d "$LOOP_TAIL" 2>/dev/null || true; }
+  trap cleanup_loops ERR INT
+
   cat >"$tbl" <<EOF
 0 ${START} linear ${LOOP_HEADER} 0
 ${START} ${PART_SECTORS} linear ${PART} 0
 $((START + PART_SECTORS)) ${TAIL_SECTORS} linear ${LOOP_TAIL} 0
 EOF
   dmsetup create "$dm" "$tbl"
-  echo -e "${green}✅ 已创建 $dm${reset}"
+  trap - ERR INT
+  echo -e "${green}✅ 已创建 $dm (/dev/mapper/$dm)${reset}"
 }
 
-# ---- 安全磁盘选择 ----
+# ---- 交互选择 ----
 pick_disk(){
   mapfile -t DISKS < <(lsblk -dpno NAME,SIZE,MODEL | grep -E "/dev/" || true)
-  [ "${#DISKS[@]}" -gt 0 ] || mapfile -t DISKS < <(lsblk -dpno NAME,SIZE | grep -E "/dev/" || true)
   [ "${#DISKS[@]}" -gt 0 ] || die "未发现可用磁盘"
   echo "请选择目标磁盘："
   local i=1; for row in "${DISKS[@]}"; do echo "[$i] $row"; i=$((i+1)); done; echo "[0] 取消"
@@ -143,7 +170,7 @@ pick_disk(){
 
 pick_part(){
   local disk="$1"
-  mapfile -t PARTS < <(lsblk -no NAME,SIZE,FSTYPE -p "$disk" | tail -n +2)
+  mapfile -t PARTS < <(lsblk -no NAME,SIZE,FSTYPE -p "$disk" | tail -n +2 || true)
   [ "${#PARTS[@]}" -gt 0 ] || die "该磁盘无分区"
   echo "请选择要直通的分区："
   local i=1; for row in "${PARTS[@]}"; do echo "[$i] $row"; i=$((i+1)); done; echo "[0] 取消"
@@ -156,14 +183,23 @@ create_interactive(){
   echo -e "${green}✨ 创建/重建 virtjoin（交互配置）...${reset}"
   local DISK PART PB D CFG
   DISK="$(pick_disk)" || { echo "已取消"; return; }
+  [ -b "$DISK" ] || die "$DISK 不是块设备。"
   PART="$(pick_part "$DISK")" || { echo "已取消"; return; }
+  [ -b "$PART" ] || die "$PART 不存在。"
+
   PB="$(pb_from_part "$PART")"; D="$(dir_of_pb "$PB")"; CFG="$(cfg_of_dir "$D")"
   mkdir -p "$D"
+  local pbase dbase got; pbase="$(basename "$PART")"; dbase="$(basename "$DISK")"
+  got="$(basename "$(realpath "/sys/class/block/$pbase/..")")"
+  [ "$got" = "$dbase" ] || die "选择错误：$PART 不属于 $DISK"
+
   cat >"$CFG" <<EOF
 DISK="$DISK"
 PART="$PART"
 PB="$PB"
 EOF
+  log "配置已保存到 $CFG"
+  rm -f "$(header_of_dir "$D")"
   remove_pb "$PB" || true
   _do_build_from_cfg "$CFG"
   read -rp "是否注册 systemd 自动恢复 [$PB]？(y/N): " yn
@@ -206,6 +242,11 @@ full_uninstall(){
   echo -e "${yellow}⚠️ 确定要完全卸载 virtjoin 吗？(y/N)${reset}"
   read -r yn; [[ "$yn" =~ ^[Yy]$ ]] || { echo "已取消"; return; }
   for pb in $(list_pbs); do remove_pb "$pb"; done
+  if [ -f "$SYSTEMD_TMPL" ]; then
+    systemctl list-unit-files 'virtjoin@*.service' --no-legend 2>/dev/null | awk '{print $1}' | while read -r u; do
+      [ -n "$u" ] && systemctl disable "$u" 2>/dev/null || true
+    done
+  fi
   rm -rf "$BASE_DIR" "$SYSTEMD_TMPL" "$SELF_PATH"
   systemctl daemon-reload
   echo -e "${green}🗑️ 已完全卸载 virtjoin${reset}"
