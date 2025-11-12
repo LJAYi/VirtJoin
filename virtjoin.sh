@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  virtjoin v2.6.2 — Multi-Mapping Manager for Proxmox VE
+#  virtjoin v2.6.3 — Multi-Mapping Manager for Proxmox VE
 #  Author: LJAYi
 # ============================================================
 
@@ -13,6 +13,7 @@ BASE_DIR="/var/lib/virtjoin"
 SYSTEMD_TMPL="/etc/systemd/system/virtjoin@.service"
 SELF_PATH="/usr/local/bin/virtjoin.sh"
 REPO_URL="https://raw.githubusercontent.com/LJAYi/VirtJoin/main/virtjoin.sh"
+VERSION="v2.6.3"
 
 green="\e[32m"; yellow="\e[33m"; red="\e[31m"; reset="\e[0m"
 log(){ echo -e "${green}${LOG_TAG}${reset} $*"; }
@@ -128,7 +129,6 @@ EOF
   echo -e "${green}✅ 已创建 $dm${reset}"
 }
 
-# ---- 安全磁盘选择 ----
 pick_disk(){
   mapfile -t DISKS < <(
     lsblk -dpno NAME,SIZE,MODEL 2>/dev/null \
@@ -233,7 +233,7 @@ fi
 while true; do
   clear
   echo -e "${green}===============================${reset}"
-  echo -e "${green} virtjoin 控制中心（多映射）${reset}"
+  echo -e "${green} virtjoin 控制中心（多映射） ${VERSION}${reset}"
   echo -e "${green}===============================${reset}"
   show_status
   echo "1) 查看当前状态"
