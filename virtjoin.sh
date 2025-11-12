@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  virtjoin v3.0 — Secure Multi-Mapping Manager for Proxmox VE
+#  virtjoin v3.0.1 — Secure Multi-Mapping Manager for Proxmox VE
 #  Author: LJAYi
 # ============================================================
 
@@ -13,7 +13,7 @@ BASE_DIR="/var/lib/virtjoin"
 SYSTEMD_TMPL="/etc/systemd/system/virtjoin@.service"
 SELF_PATH="/usr/local/bin/virtjoin.sh"
 REPO_URL="https://raw.githubusercontent.com/LJAYi/VirtJoin/main/virtjoin.sh"
-VERSION="v3.0"
+VERSION="v3.0.1"
 
 green="\e[32m"; yellow="\e[33m"; red="\e[31m"; dim="\e[2m"; reset="\e[0m"
 log(){ echo -e "${green}${LOG_TAG}${reset} $*"; }
@@ -157,17 +157,21 @@ EOF
   echo -e "${green}✅ 已创建 $dm (/dev/mapper/$dm)${reset}"
 }
 
-# ---- 交互选择 ----
+# ---- 修正版 pick_disk ----
 pick_disk(){
-  mapfile -t DISKS < <(lsblk -dpno NAME,SIZE,MODEL | grep -E "/dev/" || true)
-  [ "${#DISKS[@]}" -gt 0 ] || die "未发现可用磁盘"
+  local filter="/dev/sd|/dev/nvme"
+  mapfile -t DISKS < <(lsblk -dpno NAME,SIZE,MODEL | grep -E "$filter" || true)
+  [ "${#DISKS[@]}" -gt 0 ] || mapfile -t DISKS < <(lsblk -dpno NAME,SIZE | grep -E "$filter" || true)
+  [ "${#DISKS[@]}" -gt 0 ] || die "未发现可用磁盘 (lsblk 无法列出 sd/nvme 设备)"
   echo "请选择目标磁盘："
   local i=1; for row in "${DISKS[@]}"; do echo "[$i] $row"; i=$((i+1)); done; echo "[0] 取消"
   read -rp "编号: " idx; [[ "$idx" =~ ^[0-9]+$ ]] || die "输入无效"
   [ "$idx" -eq 0 ] && return 1
+  [ "$idx" -ge 1 ] && [ "$idx" -le "${#DISKS[@]}" ] || die "编号越界"
   echo "${DISKS[$((idx-1))]}" | awk '{print $1}'
 }
 
+# ---- 选择分区 ----
 pick_part(){
   local disk="$1"
   mapfile -t PARTS < <(lsblk -no NAME,SIZE,FSTYPE -p "$disk" | tail -n +2 || true)
@@ -186,13 +190,11 @@ create_interactive(){
   [ -b "$DISK" ] || die "$DISK 不是块设备。"
   PART="$(pick_part "$DISK")" || { echo "已取消"; return; }
   [ -b "$PART" ] || die "$PART 不存在。"
-
   PB="$(pb_from_part "$PART")"; D="$(dir_of_pb "$PB")"; CFG="$(cfg_of_dir "$D")"
   mkdir -p "$D"
   local pbase dbase got; pbase="$(basename "$PART")"; dbase="$(basename "$DISK")"
   got="$(basename "$(realpath "/sys/class/block/$pbase/..")")"
   [ "$got" = "$dbase" ] || die "选择错误：$PART 不属于 $DISK"
-
   cat >"$CFG" <<EOF
 DISK="$DISK"
 PART="$PART"
