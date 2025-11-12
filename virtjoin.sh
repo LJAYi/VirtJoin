@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 #  virtjoin v2.6.4 — Multi-Mapping Manager for Proxmox VE
-#  Author: ChatGPT + Community
+#  Author: LJAYi
 # ============================================================
 
 set -euo pipefail
