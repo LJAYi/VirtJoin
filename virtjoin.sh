@@ -1,14 +1,14 @@
 #!/bin/bash
 # ============================================================
-#  virtjoin v3.0.3-manual — Secure Multi-Mapping (Manual Disk/Part Input)
+#  virtjoin v3.0.4 — Secure Multi-Mapping (Manual Disk/Part Input)
 #  Author: LJAYi
 #  Highlights:
-#   • 多映射：每个分区独立目录/独立 dm 名/独立 systemd 实例
-#   • 手动输入磁盘与分区（展示可用整盘列表，确保任何设备类型都可用）
-#   • 安全校验：分区归属检查 + GPT 尾部扇区检查（≥33）
-#   • 仅首次创建 header.img，避免系统启动时重复重建
-#   • 失败自动清理 loop（trap）
-#   • 一行安装：自动复制至 /usr/local/bin/virtjoin.sh 并重启自身
+#   • 多映射：每分区独立目录 / DM 名 / systemd 实例
+#   • 手动输入磁盘与分区：展示 TYPE=disk 列表，输入不受前缀限制(sd/nvme/vd/xvd/USB均可)
+#   • 安全：分区归属校验 + GPT 尾部扇区检查(≥33)
+#   • 性能：header.img 仅首次创建；tail 动态调整
+#   • 稳定：失败自动清理 loop (trap)
+#   • 一行安装：自动复制到 /usr/local/bin/virtjoin.sh 并自重启
 # ============================================================
 
 set -euo pipefail
@@ -20,7 +20,7 @@ BASE_DIR="/var/lib/virtjoin"
 SYSTEMD_TMPL="/etc/systemd/system/virtjoin@.service"
 SELF_PATH="/usr/local/bin/virtjoin.sh"
 REPO_URL="https://raw.githubusercontent.com/LJAYi/VirtJoin/main/virtjoin.sh"
-VERSION="v3.0.3-manual"
+VERSION="v3.0.4"
 
 green="\e[32m"; yellow="\e[33m"; red="\e[31m"; reset="\e[0m"
 log(){ echo -e "${green}${LOG_TAG}${reset} $*"; }
@@ -56,9 +56,9 @@ self_install_check "$@"
 
 # ---- 工具与路径（多映射） ----
 loop_of(){ losetup -j "$1" | awk -F: '{print $1}'; }
-pb_from_part(){ basename "$1"; }                 # sda1 / nvme0n1p1 / vda1
-dir_of_pb(){ echo "$BASE_DIR/$1"; }               # /var/lib/virtjoin/sda1
-dmname_of_pb(){ echo "virtjoin-$1"; }             # virtjoin-sda1
+pb_from_part(){ basename "$1"; }                # sda1 / nvme0n1p1 / vda1
+dir_of_pb(){ echo "$BASE_DIR/$1"; }              # /var/lib/virtjoin/sda1
+dmname_of_pb(){ echo "virtjoin-$1"; }            # virtjoin-sda1
 cfg_of_dir(){ echo "$1/config"; }
 header_of_dir(){ echo "$1/header.img"; }
 tail_of_dir(){ echo "$1/tail.img"; }
@@ -82,17 +82,21 @@ EOF
 systemctl daemon-reload
 }
 
-# ---- 罗列已配置的映射（目录存在且带 config） ----
+# ---- 稳健列出已配置映射（依据 config 文件存在） ----
 list_pbs(){
-  find "$BASE_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read -r d; do
-    [ -f "$(cfg_of_dir "$d")" ] && basename "$d"
+  mapfile -t CFGS < <(find "$BASE_DIR" -mindepth 2 -maxdepth 2 -type f -name config -print 2>/dev/null || true)
+  [ "${#CFGS[@]}" -eq 0 ] && return 0
+  local cfg pb
+  for cfg in "${CFGS[@]}"; do
+    pb="$(basename "$(dirname "$cfg")")"
+    [ -n "$pb" ] && echo "$pb"
   done
 }
 
 # ---- 状态显示（多映射） ----
 show_status(){
   echo -e "\n====== virtjoin 状态 ======"
-  local any=0
+  local any=0 pb
   while read -r pb; do
     [ -z "$pb" ] && continue
     any=1
@@ -111,8 +115,11 @@ show_status(){
 
 # ---- 移除单个映射（安全清理 loop） ----
 remove_pb(){
-  local pb="$1" d="$(dir_of_pb "$pb")" dm="$(dmname_of_pb "$pb")"
-  local hdr="$(header_of_dir "$d")" tl="$(tail_of_dir "$d")"
+  local pb="$1" d dm hdr tl lp
+  d="$(dir_of_pb "$pb")"
+  dm="$(dmname_of_pb "$pb")"
+  hdr="$(header_of_dir "$d")"
+  tl="$(tail_of_dir "$d")"
   echo -e "${yellow}🧹 正在移除 $dm ...${reset}"
   dmsetup remove "$dm" 2>/dev/null || true
   for f in "$hdr" "$tl"; do
@@ -178,35 +185,32 @@ EOF
   echo -e "${green}✅ 已创建 $dm (/dev/mapper/$dm)${reset}"
 }
 
-# ---- 手动交互创建（回退到 v2.5 风格，但保存为多映射） ----
+# ---- 手动交互创建（回退到 v2.5 样式，仅展示 TYPE=disk） ----
 create_interactive(){
   echo -e "${green}✨ 创建/重建 virtjoin（手动输入磁盘/分区）...${reset}"
 
-  # 展示“整盘”列表（TYPE=disk），仅供参考；真正的输入允许任意合法块设备名
-  echo "可用整盘 (TYPE=disk)："
+  echo "可用整盘 (TYPE=disk，仅供参考)："
   lsblk -dpno NAME,TYPE,SIZE,MODEL | awk '$2=="disk"{print "  -",$1,$3,$4}' || true
   echo
 
-  # 手动输入磁盘
   local DISK PART PB D CFG
   read -rp "请输入目标磁盘 (例如 /dev/sda 或 /dev/nvme0n1 或 /dev/vda): " DISK
   [ -b "$DISK" ] || die "$DISK 不是块设备。"
 
   echo
   echo "该磁盘的分区："
-  lsblk -no NAME,SIZE,FSTYPE,MOUNTPOINT -p "$DISK" | sed '1!b; s/^/  /' || true
+  lsblk -no NAME,SIZE,FSTYPE,MOUNTPOINT -p "$DISK" 2>/dev/null || true
   echo
   read -rp "请选择要直通的分区 (例如 sda1 或 /dev/sda1): " PART
   [[ "$PART" != /dev/* ]] && PART="/dev/$PART"
   [ -b "$PART" ] || die "$PART 不存在。"
 
-  # 校验分区归属
+  # 分区归属校验
   local pbase dbase got
   pbase="$(basename "$PART")"; dbase="$(basename "$DISK")"
   got="$(basename "$(realpath "/sys/class/block/$pbase/..")")"
   [ "$got" = "$dbase" ] || die "选择错误：$PART 不属于 $DISK"
 
-  # 为该分区构建独立配置与目录
   PB="$(pb_from_part "$PART")"
   D="$(dir_of_pb "$PB")"; mkdir -p "$D"
   CFG="$(cfg_of_dir "$D")"
@@ -222,7 +226,6 @@ EOF
   remove_pb "$PB" || true
   _do_build_from_cfg "$CFG"
 
-  # 询问是否注册/启用 systemd 自动恢复
   read -rp "是否注册 systemd 自动恢复 [$PB]？(y/N): " yn
   if [[ "$yn" =~ ^[Yy]$ ]]; then
     ensure_tmpl_unit
@@ -231,14 +234,37 @@ EOF
   fi
 }
 
-# ---- 选择某个已配置映射 ----
+# ---- 稳健选择某个已配置映射 ----
 pick_pb(){
-  mapfile -t PBS < <(list_pbs)
-  [ "${#PBS[@]}" -gt 0 ] || { echo "暂无配置"; return 1; }
+  mapfile -t PBS < <(list_pbs || true)
+  if [ "${#PBS[@]}" -eq 0 ]; then
+    echo "暂无配置"
+    read -rp "按 Enter 返回菜单..." _ 2>/dev/null || true
+    return 1
+  fi
   echo "请选择目标映射："
-  local i=1; for pb in "${PBS[@]}"; do echo "[$i] $pb"; i=$((i+1)); done; echo "[0] 取消"
-  read -rp "编号: " idx; [[ "$idx" =~ ^[0-9]+$ ]] || { echo "输入无效"; return 1; }
+  local i=1 pb dm mark cfg part
+  for pb in "${PBS[@]}"; do
+    [ -z "$pb" ] && continue
+    dm="$(dmname_of_pb "$pb")"
+    cfg="$(cfg_of_dir "$(dir_of_pb "$pb")")"
+    if dmsetup info "$dm" &>/dev/null; then
+      mark="已加载"
+    else
+      mark="未加载"
+    fi
+    part=""
+    [ -f "$cfg" ] && part="$(awk -F= '/^PART=/{gsub(/"/,"",$2);print $2}' "$cfg" 2>/dev/null || true)"
+    [ -n "$part" ] && echo "[$i] $pb  ($mark, PART=$part)" || echo "[$i] $pb  ($mark)"
+    i=$((i+1))
+  done
+  echo "[0] 取消"
+
+  read -rp "编号: " idx
+  [[ "$idx" =~ ^[0-9]+$ ]] || { echo "输入无效"; return 1; }
   [ "$idx" -eq 0 ] && return 1
+  [ "$idx" -ge 1 ] && [ "$idx" -lt "$i" ] || { echo "编号越界"; return 1; }
+
   echo "${PBS[$((idx-1))]}"
 }
 
