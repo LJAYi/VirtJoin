@@ -1,22 +1,19 @@
 #!/bin/bash
 # ============================================================
-#  virtjoin v2.3 — Virtual Disk Joiner for Proxmox VE
+#  virtjoin v2.4 — Virtual Disk Joiner for Proxmox VE
 #  Author: ChatGPT + Community
 #  Highlights:
-#   • Interactive + non-interactive split (safe for systemd)
+#   • Truly one-line install (auto-detect pipe input)
+#   • Safe systemd non-interactive rebuild
 #   • Config saved to /var/lib/virtjoin/config
-#   • Self-install (one-line install)
-#   • Root check, GPT sanity, 4K sector compatible
-#   • Automatic cleanup & dependency safety
+#   • 4K sector / GPT / wrong pairing protection
+#   • Robust cleanup and restart-safe
 # ============================================================
 
 set -euo pipefail
-
-# ---- Require root ----
 [ "${EUID:-$(id -u)}" -eq 0 ] || { echo "[virtjoin] ERROR: 请用 root 运行"; exit 1; }
 umask 0077
 
-# ---- Paths ----
 LOG_TAG="[virtjoin]"
 INSTALL_DIR="/var/lib/virtjoin"
 CONFIG_FILE="$INSTALL_DIR/config"
@@ -27,32 +24,42 @@ DM_NAME="virtjoin"
 SYSTEMD_UNIT="/etc/systemd/system/virtjoin.service"
 SELF_PATH="/usr/local/bin/virtjoin.sh"
 
-# ---- Colors & logging ----
 green="\e[32m"; yellow="\e[33m"; red="\e[31m"; dim="\e[2m"; reset="\e[0m"
 log()  { echo -e "${green}${LOG_TAG}${reset} $*"; }
 warn() { echo -e "${yellow}${LOG_TAG}${reset} ⚠️ $*"; }
 die()  { echo -e "${red}${LOG_TAG} ERROR:${reset} $*" >&2; exit 1; }
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "缺少命令: $1"; }
-for c in blockdev losetup dmsetup dd truncate awk grep sed stat systemctl lsblk; do need_cmd "$c"; done
+for c in blockdev losetup dmsetup dd truncate awk grep sed stat systemctl lsblk curl; do need_cmd "$c"; done
 mkdir -p "$INSTALL_DIR"
 
-# ---- Self-install check (before CLI parsing) ----
+# ---- 自安装检测（增强版，支持一行安装） ----
 self_install_check() {
   local cur
+  # 如果脚本来自管道或进程替换，则直接下载正式文件
+  if [ ! -e "$0" ] || [[ "$0" =~ ^/proc/ ]] || [[ "$0" == "bash" ]]; then
+    echo "[virtjoin] 检测到脚本来自管道输入，自动安装到 $SELF_PATH ..."
+    mkdir -p "$(dirname "$SELF_PATH")"
+    curl -fsSL "https://raw.githubusercontent.com/LJAYi/VirtJoin/main/virtjoin.sh" -o "$SELF_PATH"
+    chmod +x "$SELF_PATH"
+    echo "[virtjoin] 已安装到 $SELF_PATH"
+    exec "$SELF_PATH" "$@"
+  fi
+
+  # 普通文件执行，自安装到目标路径
   if command -v realpath >/dev/null 2>&1; then cur="$(realpath "$0")"; else cur="$(readlink -f "$0")"; fi
   if [ "$cur" != "$SELF_PATH" ]; then
-    echo -e "${dim}${LOG_TAG} 脚本未安装，正在复制到 $SELF_PATH ...${reset}"
+    echo "[virtjoin] 安装脚本到 $SELF_PATH ..."
     mkdir -p "$(dirname "$SELF_PATH")"
     cp "$cur" "$SELF_PATH"
     chmod +x "$SELF_PATH"
-    echo -e "${green}${LOG_TAG}${reset} 已安装到 $SELF_PATH"
+    echo "[virtjoin] 已安装到 $SELF_PATH"
     exec "$SELF_PATH" "$@"
   fi
 }
 self_install_check "$@"
 
-# ---- Helpers ----
+# ---- 辅助函数 ----
 loop_of() { losetup -j "$1" | awk -F: '{print $1}'; }
 
 show_status() {
@@ -82,16 +89,14 @@ remove_mapping() {
   sleep 0.2
 }
 
-# ---- Core builder (non-interactive) ----
+# ---- 构建核心逻辑 ----
 _do_build() {
   [ -n "${DISK:-}" ] && [ -n "${PART:-}" ] || die "DISK/PART 为空"
   [ -b "$DISK" ] || die "磁盘不存在: $DISK"
   [ -b "$PART" ] || die "分区不存在: $PART"
 
-  # 确保分区属于目标磁盘
   pbase="$(basename "$PART")"; dbase="$(basename "$DISK")"
-  p_block_dir="/sys/class/block/$pbase"
-  disk_of_part="$(basename "$(realpath "${p_block_dir}/..")")"
+  disk_of_part="$(basename "$(realpath "/sys/class/block/$pbase/..")")"
   [ "$disk_of_part" = "$dbase" ] || die "选择错误：$PART 不属于 $DISK"
 
   SS=$(blockdev --getss "$DISK")
@@ -130,13 +135,11 @@ EOF
   dmsetup create "$DM_NAME" "$DM_TABLE"
   trap - ERR INT
   echo -e "${green}✅ 已创建 /dev/mapper/$DM_NAME${reset}"
-  sleep 0.2
 }
 
-# ---- Interactive configure ----
+# ---- 交互式配置 ----
 create_mapping_interactive() {
   echo -e "${green}✨ 创建/重建 virtjoin（交互配置）...${reset}"
-
   lsblk -dpno NAME,SIZE,MODEL | grep -E "/dev/sd|/dev/nvme" || true
   read -rp "请输入目标磁盘 (例如 /dev/sda): " DISK
   [ -b "$DISK" ] || die "$DISK 不是块设备。"
@@ -146,16 +149,14 @@ create_mapping_interactive() {
   [[ "$PART" != /dev/* ]] && PART="/dev/$PART"
   [ -b "$PART" ] || die "$PART 不存在。"
 
-  # 验证配对
   pbase="$(basename "$PART")"; dbase="$(basename "$DISK")"
-  p_block_dir="/sys/class/block/$pbase"
-  disk_of_part="$(basename "$(realpath "${p_block_dir}/..")")"
+  disk_of_part="$(basename "$(realpath "/sys/class/block/$pbase/..")")"
   [ "$disk_of_part" = "$dbase" ] || die "选择错误：$PART 不属于 $DISK"
 
   echo "DISK=\"$DISK\"" > "$CONFIG_FILE"
   echo "PART=\"$PART\"" >> "$CONFIG_FILE"
   log "配置已保存到 $CONFIG_FILE"
-  rm -f "$HEADER_IMG" && log "已清除旧 header.img ，将按新配置重建"
+  rm -f "$HEADER_IMG" && log "已清除旧 header.img，将按新配置重建"
 
   remove_mapping
   _do_build
@@ -219,7 +220,7 @@ if [[ "${1:-}" =~ ^-- ]]; then
   exit 0
 fi
 
-# ---- Interactive menu ----
+# ---- 菜单 ----
 while true; do
   clear
   echo -e "${green}===============================${reset}"
