@@ -1,7 +1,13 @@
 #!/bin/bash
 # ============================================================
-#  virtjoin v3.0.2 — Secure Multi-Mapping Manager for Proxmox VE
-#  Author: LJAYi
+#  virtjoin v3.0.3 — Universal Multi-Mapping Manager for Proxmox VE
+#  Author: ChatGPT + Community
+#  Highlights:
+#   • 精准的 TYPE=disk 自动检测机制，支持 sd/nvme/vd/xvd 等设备
+#   • 多映射管理（每个分区独立目录 / systemd 实例）
+#   • 完整的安全校验（分区归属、GPT 尾部扇区检查）
+#   • 一键安装与自动 systemd 注册
+#   • 自动 loop 清理与容错保护
 # ============================================================
 
 set -euo pipefail
@@ -13,7 +19,7 @@ BASE_DIR="/var/lib/virtjoin"
 SYSTEMD_TMPL="/etc/systemd/system/virtjoin@.service"
 SELF_PATH="/usr/local/bin/virtjoin.sh"
 REPO_URL="https://raw.githubusercontent.com/LJAYi/VirtJoin/main/virtjoin.sh"
-VERSION="v3.0.2"
+VERSION="v3.0.3"
 
 green="\e[32m"; yellow="\e[33m"; red="\e[31m"; dim="\e[2m"; reset="\e[0m"
 log(){ echo -e "${green}${LOG_TAG}${reset} $*"; }
@@ -74,7 +80,11 @@ EOF
 systemctl daemon-reload
 }
 
-list_pbs(){ find "$BASE_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read -r d; do [ -f "$(cfg_of_dir "$d")" ] && basename "$d"; done; }
+list_pbs(){
+  find "$BASE_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read -r d; do
+    [ -f "$(cfg_of_dir "$d")" ] && basename "$d"
+  done
+}
 
 show_status(){
   echo -e "\n====== virtjoin 状态 ======"
@@ -96,8 +106,11 @@ show_status(){
 }
 
 remove_pb(){
-  local pb="$1" d="$(dir_of_pb "$pb")" dm="$(dmname_of_pb "$pb")"
-  local hdr="$(header_of_dir "$d")" tl="$(tail_of_dir "$d")"
+  local pb="$1"
+  local d="$(dir_of_pb "$pb")"
+  local dm="$(dmname_of_pb "$pb")"
+  local hdr="$(header_of_dir "$d")"
+  local tl="$(tail_of_dir "$d")"
   echo -e "${yellow}🧹 正在移除 $dm ...${reset}"
   dmsetup remove "$dm" 2>/dev/null || true
   for f in "$hdr" "$tl"; do
@@ -113,12 +126,14 @@ _do_build_from_cfg(){
   source "$cfg"
   [ -n "${DISK:-}" ] && [ -n "${PART:-}" ] && [ -n "${PB:-}" ] || die "配置不完整: $cfg"
 
-  local d="$(dir_of_pb "$PB")" dm="$(dmname_of_pb "$PB")"
-  local hdr="$(header_of_dir "$d")" tl="$(tail_of_dir "$d")" tbl="$(table_of_dir "$d")"
+  local d="$(dir_of_pb "$PB")"
+  local dm="$(dmname_of_pb "$PB")"
+  local hdr="$(header_of_dir "$d")"
+  local tl="$(tail_of_dir "$d")"
+  local tbl="$(table_of_dir "$d")"
   [ -b "$DISK" ] || die "磁盘不存在: $DISK"
   [ -b "$PART" ] || die "分区不存在: $PART"
 
-  # 校验分区归属
   local pbase dbase got
   pbase="$(basename "$PART")"; dbase="$(basename "$DISK")"
   got="$(basename "$(realpath "/sys/class/block/$pbase/..")")"
@@ -157,28 +172,39 @@ EOF
   echo -e "${green}✅ 已创建 $dm (/dev/mapper/$dm)${reset}"
 }
 
-# ---- v3.0.2: 最终 pick_disk ----
+# ---- v3.0.3: TYPE=disk 自动检测 ----
 pick_disk(){
-  # [FIX v3.0.2] 使用 TYPE=disk 自动识别整盘设备
   mapfile -t DISKS < <(lsblk -dpno NAME,TYPE,SIZE,MODEL | awk '$2=="disk" {print $1, $3, $4}' || true)
   [ "${#DISKS[@]}" -gt 0 ] || mapfile -t DISKS < <(lsblk -dpno NAME,TYPE,SIZE | awk '$2=="disk" {print $1, $3}' || true)
   [ "${#DISKS[@]}" -gt 0 ] || die "未发现可用磁盘 (lsblk 未列出任何 TYPE=disk 的设备)"
   echo "请选择目标磁盘："
-  local i=1; for row in "${DISKS[@]}"; do echo "[$i] $row"; i=$((i+1)); done; echo "[0] 取消"
-  read -rp "编号: " idx; [[ "$idx" =~ ^[0-9]+$ ]] || die "输入无效"
+  local i=1
+  for row in "${DISKS[@]}"; do
+    echo "[$i] $row"
+    i=$((i+1))
+  done
+  echo "[0] 取消"
+  read -rp "编号: " idx
+  [[ "$idx" =~ ^[0-9]+$ ]] || die "输入无效"
   [ "$idx" -eq 0 ] && return 1
   [ "$idx" -ge 1 ] && [ "$idx" -le "${#DISKS[@]}" ] || die "编号越界"
   echo "${DISKS[$((idx-1))]}" | awk '{print $1}'
 }
 
-# ---- 选择分区 ----
+# ---- 分区选择 ----
 pick_part(){
   local disk="$1"
   mapfile -t PARTS < <(lsblk -no NAME,SIZE,FSTYPE -p "$disk" | tail -n +2 || true)
   [ "${#PARTS[@]}" -gt 0 ] || die "该磁盘无分区"
   echo "请选择要直通的分区："
-  local i=1; for row in "${PARTS[@]}"; do echo "[$i] $row"; i=$((i+1)); done; echo "[0] 取消"
-  read -rp "编号: " idx; [[ "$idx" =~ ^[0-9]+$ ]] || die "输入无效"
+  local i=1
+  for row in "${PARTS[@]}"; do
+    echo "[$i] $row"
+    i=$((i+1))
+  done
+  echo "[0] 取消"
+  read -rp "编号: " idx
+  [[ "$idx" =~ ^[0-9]+$ ]] || die "输入无效"
   [ "$idx" -eq 0 ] && return 1
   echo "${PARTS[$((idx-1))]}" | awk '{print $1}'
 }
@@ -208,6 +234,7 @@ EOF
   [[ "$yn" =~ ^[Yy]$ ]] && ensure_tmpl_unit && systemctl enable "virtjoin@${PB}.service" && log "已启用 virtjoin@${PB}.service"
 }
 
+# ---- systemd 注册与删除 ----
 pick_pb(){
   mapfile -t PBS < <(list_pbs)
   [ "${#PBS[@]}" -gt 0 ] || { echo "暂无配置"; return 1; }
@@ -255,7 +282,7 @@ full_uninstall(){
   exit 0
 }
 
-# ---- CLI ----
+# ---- CLI 接口 ----
 if [[ "${1:-}" =~ ^-- ]]; then
   case "$1" in
     --status) show_status ;;
@@ -269,7 +296,7 @@ if [[ "${1:-}" =~ ^-- ]]; then
   exit 0
 fi
 
-# ---- 菜单 ----
+# ---- 主菜单 ----
 while true; do
   clear
   echo -e "${green}===============================${reset}"
@@ -287,7 +314,7 @@ while true; do
     1) show_status ;;
     2) create_interactive ;;
     3) toggle_autorecover || true ;;
-    4) remove_interactive || true ;;
+    4) remove_interactive ;;
     5) full_uninstall ;;
     0) echo "再见 👋"; exit 0 ;;
     *) warn "无效选项，请重试" ;;
